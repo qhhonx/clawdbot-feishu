@@ -19,6 +19,39 @@ export type FeishuMessageInfo = {
 };
 
 /**
+ * Get user name by open_id
+ * Returns undefined if lookup fails (gracefully handles permission issues)
+ */
+async function getUserName(client: any, openId: string): Promise<string | undefined> {
+  try {
+    const res: any = await client.contact.user.get({
+      path: { user_id: openId },
+      params: { user_id_type: "open_id" },
+    });
+
+    // Try various name fields
+    const name = res?.data?.user?.name || res?.data?.user?.display_name || res?.data?.user?.nickname || res?.data?.user?.en_name;
+    if (name) return name;
+
+    // If no name found, try contact.user.list to find the user (fallback)
+    const listRes: any = await client.contact.user.list({
+      params: { department_id: "0", page_size: 100 },
+    });
+    if (listRes?.data?.items) {
+      const user = listRes.data.items.find((u: any) => u.open_id === openId);
+      if (user) {
+        return user.name || user.display_name || user.nickname;
+      }
+    }
+    return undefined;
+  } catch (err) {
+    // Log but don't throw - gracefully handle permission errors
+    console.log(`feishu: failed to get user name for ${openId}: ${err}`);
+    return undefined;
+  }
+}
+
+/**
  * Get a message by its ID.
  * Useful for fetching quoted/replied message content.
  */
@@ -61,55 +94,78 @@ export async function getMessageFeishu(params: {
       return null;
     }
 
-    const item = response.data?.items?.[0];
-    if (!item) {
+    const items = response.data?.items;
+    if (!items || items.length === 0) {
       return null;
     }
 
-    // Parse content based on message type
-    let content = item.body?.content ?? "";
-    try {
-      const parsed = JSON.parse(content);
-      if (item.msg_type === "text" && parsed.text) {
-        content = parsed.text;
-      } else if (parsed.content || parsed.elements) {
-        // Extract plain text from rich text (post) or interactive (card) format.
-        // Both use nested arrays: Array<Array<{tag, text?, href?, ...}>>
-        const blocks = parsed.content ?? parsed.elements ?? [];
-        const lines: string[] = [];
-        for (const paragraph of blocks) {
-          if (!Array.isArray(paragraph)) continue;
-          const line = paragraph
-            .map((node: { tag?: string; text?: string; href?: string }) => {
-              if (node.tag === "text") return node.text ?? "";
-              if (node.tag === "a") return node.text ?? node.href ?? "";
-              if (node.tag === "at") return "";
-              if (node.tag === "img") return "[图片]";
-              return node.text ?? "";
-            })
-            .join("");
-          if (line.trim()) lines.push(line);
+    // For merge_forward type, items contains the merge message + child messages
+    // We need to extract all child messages (excluding the first merge message)
+    const isMergeForward = items[0]?.msg_type === "merge_forward";
+    const messagesToProcess = isMergeForward ? items.slice(1) : items;
+
+    // Parse each message and combine content with sender info
+    const parsedContents: string[] = [];
+    for (const item of messagesToProcess) {
+      // Parse content based on message type
+      let content = item.body?.content ?? "";
+      try {
+        const parsed = JSON.parse(content);
+        if (item.msg_type === "text" && parsed.text) {
+          content = parsed.text;
+        } else if (parsed.content || parsed.elements) {
+          // Extract plain text from rich text (post) or interactive (card) format.
+          // Both use nested arrays: Array<Array<{tag, text?, href?, ...}>>
+          const blocks = parsed.content ?? parsed.elements ?? [];
+          const lines: string[] = [];
+          for (const paragraph of blocks) {
+            if (!Array.isArray(paragraph)) continue;
+            const line = paragraph
+              .map((node: { tag?: string; text?: string; href?: string }) => {
+                if (node.tag === "text") return node.text ?? "";
+                if (node.tag === "a") return node.text ?? node.href ?? "";
+                if (node.tag === "at") return "";
+                if (node.tag === "img") return "[图片]";
+                return node.text ?? "";
+              })
+              .join("");
+            if (line.trim()) lines.push(line);
+          }
+          const extracted = (parsed.title ? parsed.title + "\n" : "") + lines.join("\n");
+          // Filter out Feishu's degraded card placeholder text
+          if (extracted.trim() && !extracted.includes("请升级至最新版本客户端")) {
+            content = extracted;
+          } else if (extracted.includes("请升级至最新版本客户端")) {
+            content = "[卡片消息]";
+          }
         }
-        const extracted = (parsed.title ? parsed.title + "\n" : "") + lines.join("\n");
-        // Filter out Feishu's degraded card placeholder text
-        if (extracted.trim() && !extracted.includes("请升级至最新版本客户端")) {
-          content = extracted;
-        } else if (extracted.includes("请升级至最新版本客户端")) {
-          content = "[卡片消息]";
-        }
+      } catch {
+        // Keep raw content if parsing fails
       }
-    } catch {
-      // Keep raw content if parsing fails
+      if (content.trim()) {
+        // Include sender info if available
+        let senderName = "";
+        if (item.sender?.sender_type === "user" && item.sender?.id) {
+          // Try to get user name (gracefully handles failures)
+          const userName = await getUserName(client, item.sender.id);
+          senderName = userName ? `[${userName}] ` : `[${item.sender.id}] `;
+        }
+        parsedContents.push(senderName + content.trim());
+      }
     }
 
+    // Combine all message contents
+    const combinedContent = parsedContents.join("\n\n---\n\n");
+    const firstItem = items[0];
+
     return {
-      messageId: item.message_id ?? messageId,
-      chatId: item.chat_id ?? "",
-      senderId: item.sender?.id,
-      senderOpenId: item.sender?.id_type === "open_id" ? item.sender?.id : undefined,
-      content,
-      contentType: item.msg_type ?? "text",
-      createTime: item.create_time ? parseInt(item.create_time, 10) : undefined,
+      messageId: firstItem?.message_id ?? messageId,
+      chatId: firstItem?.chat_id ?? "",
+      senderId: firstItem?.sender?.id,
+      senderOpenId: firstItem?.sender?.id_type === "open_id" ? firstItem?.sender?.id : undefined,
+      content: combinedContent,
+      contentType: firstItem?.msg_type ?? "text",
+      createTime: firstItem?.create_time ? parseInt(firstItem.create_time, 10) : undefined,
     };
   } catch {
     return null;

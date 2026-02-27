@@ -238,6 +238,34 @@ function parseMessageContent(content: string, messageType: string): string {
     if (["image", "file", "audio", "video", "sticker"].includes(normalizedMessageType)) {
       return inferPlaceholder(normalizedMessageType);
     }
+    // Handle forwarded messages (single message forwarded)
+    if (messageType === "forwarded") {
+      const senderName = parsed.sender_name || parsed.sender?.name || "未知";
+      const text = parsed.text || parsed.title || "";
+      return text ? `[转发自 ${senderName}]: ${text.substring(0, 100)}` : `[转发自 ${senderName}]`;
+    }
+    // Handle merged_forwarded messages (multiple messages merged)
+    // Note: Feishu uses "merge_forward" for merged forwarded messages
+    if (messageType === "merged_forwarded" || messageType === "merge_forward") {
+      const messageCount = parsed.message_count || parsed.messages?.length || 0;
+      const senderNames = parsed.messages
+        ?.map((m: any) => m.sender_name || m.sender?.name)
+        .filter(Boolean)
+        .join(", ") || "未知";
+      // Extract preview of first few messages
+      let preview = "";
+      if (parsed.messages && parsed.messages.length > 0) {
+        const previews = parsed.messages
+          .slice(0, 3)
+          .map((m: any) => m.text || m.title || "")
+          .filter(Boolean)
+          .map((t: string) => t.substring(0, 50));
+        if (previews.length > 0) {
+          preview = `\n└ ${previews.join("\n└ ")}`;
+        }
+      }
+      return `[合并转发(${messageCount}条), 来自: ${senderNames}]${preview}`;
+    }
     return content;
   } catch {
     return content;
@@ -624,6 +652,32 @@ export async function handleFeishuMessage(params: {
   }
 
   let ctx = parseFeishuMessageEvent(event, botOpenId);
+
+  const messageType = event.message.message_type;
+
+  // For forwarded/merged_forwarded messages, fetch full message details via API
+  // Note: Feishu uses "merge_forward" for merged forwarded messages
+  // Only if feature flag is enabled (default: true)
+  const useForwardedMessages = feishuCfg.features?.forwardedMessages !== false;
+  if (
+    useForwardedMessages &&
+    (messageType === "forwarded" || messageType === "merged_forwarded" || messageType === "merge_forward")
+  ) {
+    try {
+      const fullMessage = await getMessageFeishu({
+        cfg,
+        messageId,
+        accountId: account.accountId,
+      });
+      if (fullMessage?.content) {
+        // Use the already-parsed content from getMessageFeishu (includes all child messages for merge_forward)
+        ctx = { ...ctx, content: fullMessage.content };
+      }
+    } catch (err) {
+      log(`feishu: failed to fetch forwarded message details: ${err}`);
+    }
+  }
+
   const isGroup = ctx.chatType === "group";
 
   // Resolve sender display name (best-effort) so the agent can attribute messages correctly.

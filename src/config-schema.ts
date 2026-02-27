@@ -195,14 +195,6 @@ export const FeishuConfigSchema = z
     dynamicAgentCreation: DynamicAgentCreationSchema,
     // Multi-account configuration
     accounts: z.record(z.string(), FeishuAccountConfigSchema.optional()).optional(),
-    // Feature flags
-    features: z
-      .object({
-        // Enable fetching full content for forwarded/merged_forward messages
-        // Requires contact:user.base:readonly permission in Feishu app
-        forwardedMessages: z.boolean().optional().default(true),
-      })
-      .optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

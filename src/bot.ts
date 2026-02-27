@@ -657,12 +657,7 @@ export async function handleFeishuMessage(params: {
 
   // For forwarded/merged_forwarded messages, fetch full message details via API
   // Note: Feishu uses "merge_forward" for merged forwarded messages
-  // Only if feature flag is enabled (default: true)
-  const useForwardedMessages = feishuCfg.features?.forwardedMessages !== false;
-  if (
-    useForwardedMessages &&
-    (messageType === "forwarded" || messageType === "merged_forwarded" || messageType === "merge_forward")
-  ) {
+  if (messageType === "forwarded" || messageType === "merged_forwarded" || messageType === "merge_forward") {
     try {
       const fullMessage = await getMessageFeishu({
         cfg,
